@@ -566,15 +566,9 @@ class RaceOptimizer:
             "laps": laps
         }
 
-    def _generate_fuel_pit_configs(self, initial_tyre: int) -> List[List[Tuple[int, int, float]]]:
-        """
-        Generate pit configs that actually cover the fuel needs of the race.
-        Works out how many pit stops are needed based on fuel per lap, then
-        spaces them evenly and fills to the tank cap each time.
-        """
-        # Estimate fuel per lap using a simple single-lap simulation
+    def _estimate_fuel_per_lap(self) -> float:
+        """Run a single sample lap to estimate fuel consumption per lap."""
         tyre = list(self.available_tyre_sets.values())[0]
-        weather = self.weather_schedule[0][1] if self.weather_schedule else Weather.DRY
         seg_strategy = []
         for seg in self.track:
             if seg.segment_type == SegmentType.STRAIGHT:
@@ -585,33 +579,38 @@ class RaceOptimizer:
                 })
             else:
                 seg_strategy.append({"id": seg.segment_id, "type": "corner"})
-
         sample_lap = self.simulator.simulate_lap(1, 0.0, self.car.initial_fuel, tyre, 0.0, seg_strategy)
-        fuel_per_lap = max(sample_lap.fuel_used, 0.01)
+        return max(sample_lap.fuel_used, 0.01)
 
+    def _generate_fuel_pit_configs(self, initial_tyre: int) -> List[List[Tuple[int, int, float]]]:
+        """
+        Generate pit configs that cover the fuel needs of the race.
+        Calculates the minimum number of pit stops required, then generates
+        evenly-spaced configs from that minimum up to minimum + 2.
+        """
+        fuel_per_lap = self._estimate_fuel_per_lap()
         total_laps = self.race_config.laps
         tank = self.car.fuel_capacity
         initial = self.car.initial_fuel
-
-        # How many laps can we go before running dry?
-        laps_per_tank = int(tank / fuel_per_lap)
+        total_needed = fuel_per_lap * total_laps
 
         configs = []
 
-        # No pit (only valid if fuel covers the whole race)
-        if initial >= fuel_per_lap * total_laps:
+        # No pit — only include if fuel covers the whole race
+        if initial >= total_needed:
             configs.append([])
 
-        # Build evenly-spaced pit stop configs for 1 to 4 stops
-        for num_pits in range(1, 5):
+        # Minimum pits needed: each stop can add at most one full tank
+        min_pits = max(1, math.ceil((total_needed - initial) / tank))
+
+        # Generate configs from min_pits up to min_pits + 2 for variety
+        for num_pits in range(min_pits, min_pits + 3):
             interval = total_laps // (num_pits + 1)
             pit_laps = [interval * i for i in range(1, num_pits + 1)]
-
-            # Refuel enough to reach next pit stop, capped at tank capacity
             config = []
             for pit_lap in pit_laps:
-                refuel = min(fuel_per_lap * interval * 1.1, tank)  # 10% buffer
-                refuel = round(refuel, 1)
+                # Fill enough to reach the next stop with a 10% buffer, capped at tank
+                refuel = round(min(fuel_per_lap * interval * 1.1, tank), 1)
                 config.append((pit_lap, initial_tyre, refuel))
             configs.append(config)
 
