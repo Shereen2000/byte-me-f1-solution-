@@ -636,9 +636,9 @@ def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, Ty
         corner_crash_penalty=race_data['corner_crash_penalty_s'],
         pit_exit_speed=race_data['pit_exit_speed_m/s'],
         fuel_soft_cap=race_data['fuel_soft_cap_limit_l'],
-        time_reference=race_data.get('time_reference', 7300.0)
+        time_reference=race_data.get('time_reference_s') or race_data.get('time_reference', 7300.0)
     )
-    
+
     # 3. Parse Track Segments
     track = []
     for seg_data in data['track']['segments']:
@@ -649,7 +649,7 @@ def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, Ty
             radius=seg_data.get('radius_m', None) # Radius is None for straights
         )
         track.append(segment)
-    
+
     # 4. Parse Tyre Properties (Compounds)
     tyres_db = {}
     tyre_props_data = data['tyres']['properties']
@@ -667,10 +667,12 @@ def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, Ty
             heavy_rain_degradation=props['heavy_rain_degradation']
         )
         tyres_db[compound] = tyre
-    
+
     # 5. Parse Available Tyre Sets (Individual IDs)
+    # Note: available_sets is at the top level in the real level files, not inside tyres
     available_sets = {}
-    for set_data in data['tyres']['available_sets']:
+    sets_source = data.get('available_sets') or data['tyres'].get('available_sets', [])
+    for set_data in sets_source:
         compound = set_data['compound']
         for tyre_id in set_data['ids']:
             available_sets[tyre_id] = TyreSet(
@@ -678,7 +680,7 @@ def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, Ty
                 compound=compound,
                 total_degradation=0.0
             )
-    
+
     # 6. Parse Weather Schedule (Cumulative Timing)
     weather_schedule = []
     current_time_offset = 0.0
@@ -690,78 +692,40 @@ def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, Ty
             current_time_offset += cond['duration_s']
     else:
         weather_schedule = [(0.0, Weather.DRY)]
-    
+
     return car, track, tyres_db, race_config, available_sets, weather_schedule
 
 def main():
-    """Main entry point"""
+    """Main entry point — pass a level file as an argument, e.g. python f1_race_strategy.py 1.txt"""
+    import sys
+
     print("=" * 80)
     print("ENTELECT GRAND PRIX - RACE STRATEGY OPTIMIZER")
     print("=" * 80)
-    
-    # Example usage (you would load from actual JSON)
-    # For now, we'll create a minimal test case
-    
-    car = CarSpec(
-        max_speed=90,
-        accel=10,
-        brake=20,
-        limp_speed=20,
-        crawl_speed=10,
-        fuel_capacity=150,
-        initial_fuel=150
-    )
-    
-    track = [
-        Segment(1, SegmentType.STRAIGHT, 850),
-        Segment(2, SegmentType.CORNER, 120, radius=60),
-        Segment(3, SegmentType.STRAIGHT, 850),
-        Segment(4, SegmentType.CORNER, 120, radius=60),
-    ]
-    
-    tyres_db = {
-        "Soft": TyreProperties("Soft", 1.8, 1.18, 1.00, 0.92, 0.80, 0.14, 0.11, 0.12, 0.13),
-        "Medium": TyreProperties("Medium", 1.7, 1.08, 0.97, 0.88, 0.74, 0.10, 0.08, 0.09, 0.10),
-        "Hard": TyreProperties("Hard", 1.6, 0.98, 0.92, 0.82, 0.68, 0.07, 0.06, 0.07, 0.08),
-    }
-    
-    race_config = RaceConfig(
-        name="Test Race",
-        laps=2,
-        pit_tyre_swap_time=10,
-        base_pit_stop_time=20,
-        pit_refuel_rate=5,
-        corner_crash_penalty=10,
-        pit_exit_speed=20,
-        fuel_soft_cap=1400,
-        time_reference=7300
-    )
-    
-    available_sets = {
-        1: TyreSet(1, "Soft"),
-        2: TyreSet(2, "Medium"),
-        3: TyreSet(3, "Hard"),
-    }
-    
-    weather_schedule = [(0.0, Weather.DRY)]
-    
+
+    level_file = sys.argv[1] if len(sys.argv) > 1 else "1.txt"
+    print(f"Loading level: {level_file}")
+    car, track, tyres_db, race_config, available_sets, weather_schedule = load_level_json(level_file)
+    print(f"Race: {race_config.name}  |  Laps: {race_config.laps}  |  Segments: {len(track)}")
+
     # Create optimizer
     optimizer = RaceOptimizer(car, track, tyres_db, race_config, available_sets, weather_schedule)
-    
+
     # Run optimization
     print("\nStarting grid search optimization...")
     best_strategy, best_score = optimizer.optimize_grid_search(max_iterations=20)
-    
+
     print(f"\n{'='*80}")
     print(f"BEST STRATEGY FOUND")
     print(f"{'='*80}")
     print(f"Score: {best_score:.1f}")
     print(f"Strategy: {json.dumps(best_strategy, indent=2)}")
-    
-    # Save to output file
-    with open('race_strategy.txt', 'w') as f:
+
+    # Save submission
+    output_file = "submission.txt"
+    with open(output_file, 'w') as f:
         json.dump(best_strategy, f, indent=2)
-    print(f"\nStrategy saved to: /mnt/user-data/outputs/race_strategy.json")
+    print(f"\nStrategy saved to: {output_file}")
 
 
 if __name__ == "__main__":
