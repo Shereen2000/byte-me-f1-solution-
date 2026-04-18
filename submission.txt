@@ -78,9 +78,7 @@
         }
       ],
       "pit": {
-        "enter": true,
-        "tyre_change_set_id": 1,
-        "fuel_refuel_amount_l": 30
+        "enter": false
       }
     },
     {

@@ -377,7 +377,7 @@ def demonstrate_all_algorithms():
     import sys
     from f1_race_strategy import load_level_json
 
-    level_file = sys.argv[1] if len(sys.argv) > 1 else "1.txt"
+    level_file = sys.argv[1] if len(sys.argv) > 1 else "2.txt"
     print(f"Loading level: {level_file}")
     car, track, tyres_db, race_config, available_sets, weather_schedule = load_level_json(level_file)
     print(f"Race: {race_config.name}  |  Laps: {race_config.laps}  |  Segments: {len(track)}")
@@ -397,7 +397,7 @@ def demonstrate_all_algorithms():
     print(json.dumps(best_strategy, indent=2))
 
     # Save submission
-    output_file = "submission.txt"
+    output_file = "submissions.txt"
     with open(output_file, 'w') as f:
         json.dump(best_strategy, f, indent=2)
     print(f"\nSaved to: {output_file}")

@@ -453,11 +453,18 @@ class RaceSimulator:
                     current_tyre = copy.deepcopy(self.available_tyre_sets[new_tyre_id])
                     current_tyre_id = new_tyre_id
         
+        # Race is invalid only if the car actually ran out of fuel mid-race
+        ran_out_of_fuel = any(
+            seg.fuel_depleted
+            for lap in all_lap_results
+            for seg in lap.segments
+        )
+
         return {
             "total_time": total_race_time,
             "total_fuel_used": total_fuel_used,
             "lap_results": all_lap_results,
-            "valid": total_fuel_used <= self.car.fuel_capacity * 2  # Simple validity check
+            "valid": not ran_out_of_fuel
         }
 
 
@@ -467,7 +474,7 @@ class RaceSimulator:
 
 class RaceOptimizer:
     """Finds the best race strategy using search algorithms"""
-    
+
     def __init__(self, car: CarSpec, track: List[Segment], tyres_db: Dict[str, TyreProperties],
                  race_config: RaceConfig, available_tyre_sets: Dict[int, TyreSet],
                  weather_schedule: List[Tuple[float, Weather]]):
@@ -478,7 +485,7 @@ class RaceOptimizer:
         self.available_tyre_sets = available_tyre_sets
         self.weather_schedule = weather_schedule
         self.simulator = RaceSimulator(car, track, tyres_db, race_config, available_tyre_sets, weather_schedule)
-    
+
     def calculate_score(self, race_result: Dict) -> float:
         """
         Calculate score using Level 1 formula (basic)
@@ -486,12 +493,12 @@ class RaceOptimizer:
         """
         if not race_result["valid"]:
             return -float('inf')
-        
+
         time = race_result["total_time"]
         base_score = 500000 * (self.race_config.time_reference / time) ** 3
         return base_score
-    
-    def generate_default_segment_strategy(self, segment: Segment, 
+
+    def generate_default_segment_strategy(self, segment: Segment,
                                          tyre_set: TyreSet) -> Dict:
         """
         Generate a default strategy for a segment
@@ -500,13 +507,13 @@ class RaceOptimizer:
         if segment.segment_type == SegmentType.STRAIGHT:
             tyre_props = self.tyres_db[tyre_set.compound]
             weather = self.weather_schedule[0][1] if self.weather_schedule else Weather.DRY
-            
+
             # Conservative target speed: 80% of car's max
             target_speed = self.car.max_speed * 0.8
-            
+
             # Brake point: 70% of the way through the straight
             brake_point = segment.length * 0.7
-            
+
             return {
                 "id": segment.segment_id,
                 "type": "straight",
@@ -518,7 +525,7 @@ class RaceOptimizer:
                 "id": segment.segment_id,
                 "type": "corner"
             }
-    
+
     def generate_strategy(self, initial_tyre_id: int, pit_laps: List[Tuple[int, int, float]]) -> Dict:
         """
         Generate a complete race strategy
@@ -526,17 +533,17 @@ class RaceOptimizer:
         """
         pit_set = {lap for lap, _, _ in pit_laps}
         pit_map = {lap: (tyre_id, refuel) for lap, tyre_id, refuel in pit_laps}
-        
+
         laps = []
         current_tyre_id = initial_tyre_id
         current_tyre = copy.deepcopy(self.available_tyre_sets[initial_tyre_id])
-        
+
         for lap_num in range(1, self.race_config.laps + 1):
             segments = []
             for segment in self.track:
                 seg_strategy = self.generate_default_segment_strategy(segment, current_tyre)
                 segments.append(seg_strategy)
-            
+
             pit_data = {"enter": False}
             if lap_num in pit_set:
                 new_tyre_id, refuel = pit_map[lap_num]
@@ -547,59 +554,103 @@ class RaceOptimizer:
                 }
                 current_tyre_id = new_tyre_id
                 current_tyre = copy.deepcopy(self.available_tyre_sets[new_tyre_id])
-            
+
             laps.append({
                 "lap": lap_num,
                 "segments": segments,
                 "pit": pit_data
             })
-        
+
         return {
             "initial_tyre_id": initial_tyre_id,
             "laps": laps
         }
-    
+
+    def _generate_fuel_pit_configs(self, initial_tyre: int) -> List[List[Tuple[int, int, float]]]:
+        """
+        Generate pit configs that actually cover the fuel needs of the race.
+        Works out how many pit stops are needed based on fuel per lap, then
+        spaces them evenly and fills to the tank cap each time.
+        """
+        # Estimate fuel per lap using a simple single-lap simulation
+        tyre = list(self.available_tyre_sets.values())[0]
+        weather = self.weather_schedule[0][1] if self.weather_schedule else Weather.DRY
+        seg_strategy = []
+        for seg in self.track:
+            if seg.segment_type == SegmentType.STRAIGHT:
+                seg_strategy.append({
+                    "id": seg.segment_id, "type": "straight",
+                    "target_m/s": self.car.max_speed * 0.8,
+                    "brake_start_m_before_next": int(seg.length * 0.7)
+                })
+            else:
+                seg_strategy.append({"id": seg.segment_id, "type": "corner"})
+
+        sample_lap = self.simulator.simulate_lap(1, 0.0, self.car.initial_fuel, tyre, 0.0, seg_strategy)
+        fuel_per_lap = max(sample_lap.fuel_used, 0.01)
+
+        total_laps = self.race_config.laps
+        tank = self.car.fuel_capacity
+        initial = self.car.initial_fuel
+
+        # How many laps can we go before running dry?
+        laps_per_tank = int(tank / fuel_per_lap)
+
+        configs = []
+
+        # No pit (only valid if fuel covers the whole race)
+        if initial >= fuel_per_lap * total_laps:
+            configs.append([])
+
+        # Build evenly-spaced pit stop configs for 1 to 4 stops
+        for num_pits in range(1, 5):
+            interval = total_laps // (num_pits + 1)
+            pit_laps = [interval * i for i in range(1, num_pits + 1)]
+
+            # Refuel enough to reach next pit stop, capped at tank capacity
+            config = []
+            for pit_lap in pit_laps:
+                refuel = min(fuel_per_lap * interval * 1.1, tank)  # 10% buffer
+                refuel = round(refuel, 1)
+                config.append((pit_lap, initial_tyre, refuel))
+            configs.append(config)
+
+        return configs
+
     def optimize_grid_search(self, max_iterations: int = 100) -> Tuple[Dict, float]:
         """
-        Grid search over initial tyre, pit timing, and pit tyres
+        Grid search over initial tyre and pit timing.
+        Pit configs are generated based on the actual fuel needs of the race.
         Returns: (best_strategy, best_score)
         """
         best_strategy = None
         best_score = -float('inf')
         iterations = 0
-        
+
         tyre_ids = list(self.available_tyre_sets.keys())
-        
-        # Try each initial tyre
+
         for initial_tyre in tyre_ids:
             if iterations >= max_iterations:
                 break
-            
-            # Try different pit stop patterns
-            # Simple: 0 pits, 1 pit (at lap 1), 1 pit (at mid-lap), etc.
-            pit_configs = [
-                [],  # No pit stops
-                [(1, initial_tyre, 30)],  # Pit at lap 1, refuel 30L
-                [(self.race_config.laps // 2, initial_tyre, 50)],  # Pit at mid-race
-                [(1, initial_tyre, 50), (self.race_config.laps // 2, initial_tyre, 50)],  # Two pits
-            ]
-            
+
+            pit_configs = self._generate_fuel_pit_configs(initial_tyre)
+
             for pit_config in pit_configs:
                 if iterations >= max_iterations:
                     break
-                
+
                 strategy = self.generate_strategy(initial_tyre, pit_config)
                 race_result = self.simulator.simulate_race(strategy)
                 score = self.calculate_score(race_result)
-                
+
                 print(f"Iteration {iterations}: Initial Tyre={initial_tyre}, Pits={len(pit_config)}, Score={score:.1f}, Time={race_result['total_time']:.1f}s")
-                
+
                 if score > best_score:
                     best_score = score
                     best_strategy = strategy
-                
+
                 iterations += 1
-        
+
         return best_strategy, best_score
 
 
@@ -607,12 +658,12 @@ class RaceOptimizer:
 # MAIN RUNNER
 # ============================================================================
 
-def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, TyreProperties], 
+def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, TyreProperties],
                                              RaceConfig, Dict[int, TyreSet], List[Tuple[float, Weather]]]:
     """Load and parse a level JSON file following Level 4/5 specifications."""
     with open(filepath, 'r') as f:
         data = json.load(f)
-    
+
     # 1. Parse Car Specifications
     car_data = data['car']
     car = CarSpec(
@@ -624,7 +675,7 @@ def load_level_json(filepath: str) -> Tuple[CarSpec, List[Segment], Dict[str, Ty
         fuel_capacity=car_data['fuel_tank_capacity_l'],
         initial_fuel=car_data['initial_fuel_l']
     )
-    
+
     # 2. Parse Race Configuration
     race_data = data['race']
     race_config = RaceConfig(
